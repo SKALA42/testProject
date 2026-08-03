@@ -111,6 +111,7 @@ class WeatherRecord(StrictModel):
         try:
             pd.Timestamp(value)
         except ValueError as error:
+            # pandas 원본 오류 대신 이해하기 쉬운 문구로 감싼다.
             raise ValueError("올바른 날짜/시간 문자열이 아닙니다.") from error
         return value
 
@@ -177,6 +178,8 @@ async def fetch_json(client: httpx.AsyncClient, name: str, url: str) -> FetchRes
             raise ValueError("JSON 최상위 값이 객체가 아닙니다.")
         return FetchResult(name=name, ok=True, data=data)
     except (httpx.HTTPError, json.JSONDecodeError, ValueError) as error:
+        # 네트워크 오류인지 응답 형식 오류인지 예외 종류로 구분해 출력한다.
+        print(f"[예외 처리] {name} API 호출 실패 - {type(error).__name__}: {error}")
         return FetchResult(name=name, ok=False, error=str(error))
 
 
@@ -190,12 +193,18 @@ async def collect_all() -> dict[str, FetchResult]:
     timeout = httpx.Timeout(15.0)
     headers = {"User-Agent": "day1-api-practice/1.0"}
 
-    async with httpx.AsyncClient(
-        timeout=timeout, follow_redirects=True, headers=headers
-    ) as client:
-        # 코루틴 3개를 먼저 만든 뒤 gather에 전달한다.
-        tasks = [fetch_json(client, name, url) for name, url in API_URLS.items()]
-        results = await asyncio.gather(*tasks)
+    try:
+        async with httpx.AsyncClient(
+            timeout=timeout, follow_redirects=True, headers=headers
+        ) as client:
+            # 코루틴 3개를 먼저 만든 뒤 gather에 전달한다.
+            tasks = [fetch_json(client, name, url) for name, url in API_URLS.items()]
+            results = await asyncio.gather(*tasks)
+    except httpx.HTTPError as error:
+        # 개별 API 오류는 fetch_json이 처리하므로, 여기서 잡히면
+        # 클라이언트 생성/연결 자체의 실패로 봐야 한다.
+        print(f"[예외 처리] HTTP 클라이언트 초기화 실패 - {error}")
+        raise
 
     return {result.name: result for result in results}
 
@@ -218,6 +227,8 @@ def require_data(result: FetchResult) -> dict[str, Any]:
         RuntimeError: 수집이 실패했거나 데이터가 없을 때.
     """
     if not result.ok or result.data is None:
+        # 이후 단계에서 원인 없는 RuntimeError만 보지 않도록 먼저 출력한다.
+        print(f"[예외 처리] {result.name} API 데이터 없음 - {result.error}")
         raise RuntimeError(f"{result.name} API 수집 실패: {result.error}")
     return result.data
 
@@ -248,16 +259,23 @@ def validate_weather(data: dict[str, Any]) -> list[WeatherRecord]:
     if len(lengths) != 1 or not times:
         raise ValueError("날씨 데이터 배열이 비어 있거나 길이가 서로 다릅니다.")
 
-    return [
-        WeatherRecord(
-            time=time,
-            temperature_2m=temperature,
-            precipitation_probability=probability,
-        )
-        for time, temperature, probability in zip(
-            times, temperatures, probabilities, strict=True
-        )
-    ]
+    records: list[WeatherRecord] = []
+    for time, temperature, probability in zip(
+        times, temperatures, probabilities, strict=True
+    ):
+        try:
+            records.append(
+                WeatherRecord(
+                    time=time,
+                    temperature_2m=temperature,
+                    precipitation_probability=probability,
+                )
+            )
+        except ValidationError as error:
+            # 여러 시간대 중 어느 항목이 실패했는지 알아야 원인을 빠르게 찾는다.
+            print(f"[예외 처리] 날씨 데이터 검증 실패(time={time}) - {error}")
+            raise
+    return records
 
 
 def validate_country(data: dict[str, Any]) -> CountryRecord:
@@ -276,17 +294,22 @@ def validate_country(data: dict[str, Any]) -> CountryRecord:
     if not currencies or not isinstance(currencies[0], dict):
         raise ValueError("국가 응답에 통화 정보가 없습니다.")
 
-    return CountryRecord(
-        alpha2_code=data.get("alpha2Code"),
-        alpha3_code=data.get("alpha3Code"),
-        name=data.get("name"),
-        native_name=data.get("nativeName"),
-        capital=data.get("capital"),
-        region=data.get("region"),
-        population=data.get("population"),
-        area=data.get("area"),
-        currency_code=currencies[0].get("code"),
-    )
+    try:
+        return CountryRecord(
+            alpha2_code=data.get("alpha2Code"),
+            alpha3_code=data.get("alpha3Code"),
+            name=data.get("name"),
+            native_name=data.get("nativeName"),
+            capital=data.get("capital"),
+            region=data.get("region"),
+            population=data.get("population"),
+            area=data.get("area"),
+            currency_code=currencies[0].get("code"),
+        )
+    except ValidationError as error:
+        # 응답 스키마 변경 등으로 어떤 필드가 실패했는지 바로 확인하기 위함이다.
+        print(f"[예외 처리] 국가 데이터 검증 실패 - {error}")
+        raise
 
 
 def validate_location(data: dict[str, Any]) -> LocationRecord:
@@ -305,15 +328,19 @@ def validate_location(data: dict[str, Any]) -> LocationRecord:
     if data.get("status") != "success":
         raise ValueError(f"ip-api 처리 실패: {data.get('message', '알 수 없는 오류')}")
 
-    return LocationRecord(
-        ip=data.get("query"),
-        country=data.get("country"),
-        region=data.get("regionName"),
-        city=data.get("city"),
-        latitude=data.get("lat"),
-        longitude=data.get("lon"),
-        timezone=data.get("timezone"),
-    )
+    try:
+        return LocationRecord(
+            ip=data.get("query"),
+            country=data.get("country"),
+            region=data.get("regionName"),
+            city=data.get("city"),
+            latitude=data.get("lat"),
+            longitude=data.get("lon"),
+            timezone=data.get("timezone"),
+        )
+    except ValidationError as error:
+        print(f"[예외 처리] 위치 데이터 검증 실패 - {error}")
+        raise
 
 
 def validate_all(results: dict[str, FetchResult]) -> dict[str, pd.DataFrame]:
@@ -325,9 +352,14 @@ def validate_all(results: dict[str, FetchResult]) -> dict[str, pd.DataFrame]:
     Returns:
         API 이름을 key로, 검증된 데이터의 DataFrame을 value로 갖는 딕셔너리.
     """
-    weather = validate_weather(require_data(results["weather"]))
-    country = validate_country(require_data(results["country"]))
-    location = validate_location(require_data(results["location"]))
+    try:
+        weather = validate_weather(require_data(results["weather"]))
+        country = validate_country(require_data(results["country"]))
+        location = validate_location(require_data(results["location"]))
+    except (RuntimeError, ValueError, ValidationError) as error:
+        # 세 데이터셋 중 어느 단계에서 파이프라인이 중단됐는지 요약해 보여준다.
+        print(f"[예외 처리] 검증 단계 중단 - {type(error).__name__}: {error}")
+        raise
 
     # mode="json"은 Pydantic 값을 JSON 호환 기본 타입으로 바꿔준다.
     return {
@@ -383,26 +415,36 @@ def measure_file_format(
     # perf_counter()는 시계 시간이 아니라 짧은 작업의 "경과 시간"을
     # 정밀하게 측정하는 타이머다. 저장 직전과 직후 값의 차이를 구한다.
     write_start = perf_counter()
-    if file_format == "csv":
-        # index=False: DataFrame의 행 번호는 실제 API 데이터가 아니므로 저장하지 않는다.
-        # utf-8-sig: Excel에서 한글이 깨질 가능성을 줄여준다.
-        frame.to_csv(path, index=False, encoding="utf-8-sig")
-    elif file_format == "parquet":
-        # pyarrow는 Pandas가 Parquet 파일을 읽고 쓰도록 해주는 엔진이다.
-        frame.to_parquet(path, index=False, engine="pyarrow")
-    else:
-        # 함수에 csv/parquet 외의 값이 넘어오면 잘못된 사용으로 처리한다.
-        raise ValueError(f"지원하지 않는 형식입니다: {file_format}")
+    try:
+        if file_format == "csv":
+            # index=False: 행 번호는 실제 API 데이터가 아니므로 저장하지 않는다.
+            # utf-8-sig: Excel에서 한글이 깨질 가능성을 줄여준다.
+            frame.to_csv(path, index=False, encoding="utf-8-sig")
+        elif file_format == "parquet":
+            # pyarrow는 Pandas가 Parquet 파일을 읽고 쓰도록 해주는 엔진이다.
+            frame.to_parquet(path, index=False, engine="pyarrow")
+        else:
+            # 함수에 csv/parquet 외의 값이 넘어오면 잘못된 사용으로 처리한다.
+            raise ValueError(f"지원하지 않는 형식입니다: {file_format}")
+    except OSError as error:
+        # 디스크 권한/용량 부족 등 저장 실패의 원인을 즉시 확인하기 위해 출력한다.
+        print(f"[예외 처리] {name}.{file_format} 저장 실패 - {error}")
+        raise
     write_seconds = perf_counter() - write_start
 
     # 2) 읽기 성능 측정
     # 방금 저장한 파일을 Pandas로 다시 불러와 loaded DataFrame을 만든다.
     # 저장만 측정하는 것이 아니라 실제 재사용 속도까지 비교하기 위함이다.
     read_start = perf_counter()
-    if file_format == "csv":
-        loaded = pd.read_csv(path)
-    else:
-        loaded = pd.read_parquet(path, engine="pyarrow")
+    try:
+        if file_format == "csv":
+            loaded = pd.read_csv(path)
+        else:
+            loaded = pd.read_parquet(path, engine="pyarrow")
+    except (OSError, pd.errors.ParserError) as error:
+        # 방금 쓴 파일을 다시 읽지 못하면 저장 형식 자체에 문제가 있다는 신호이다.
+        print(f"[예외 처리] {name}.{file_format} 읽기 실패 - {error}")
+        raise
     read_seconds = perf_counter() - read_start
 
     # 3) 비교표에 넣을 결과 생성
@@ -427,8 +469,12 @@ def save_and_compare(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
     Returns:
         데이터셋 x 형식 조합별 성능 측정 결과를 담은 DataFrame.
     """
-    # output 폴더가 없으면 생성하고, 있으면 그대로 사용한다.
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        # output 폴더가 없으면 생성하고, 있으면 그대로 사용한다.
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        print(f"[예외 처리] 출력 폴더 생성 실패({OUTPUT_DIR}) - {error}")
+        raise
     measurements: list[dict[str, Any]] = []
 
     # weather, country, location DataFrame을 하나씩 꺼낸다.
@@ -440,8 +486,12 @@ def save_and_compare(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
     # 측정 결과 목록을 표(DataFrame)로 변환하여 터미널 출력과 저장에 사용한다.
     comparison = pd.DataFrame(measurements)
-    # 보고서에 활용할 수 있도록 비교 결과 자체도 CSV로 저장한다.
-    comparison.to_csv(OUTPUT_DIR / "performance_comparison.csv", index=False)
+    try:
+        # 보고서에 활용할 수 있도록 비교 결과 자체도 CSV로 저장한다.
+        comparison.to_csv(OUTPUT_DIR / "performance_comparison.csv", index=False)
+    except OSError as error:
+        print(f"[예외 처리] 성능 비교표 저장 실패 - {error}")
+        raise
     return comparison
 
 
@@ -472,7 +522,13 @@ def run_check(command: list[str], label: str) -> bool:
         명령이 종료 코드 0으로 끝났으면 True, 아니면 False.
     """
     print(f"\n$ {' '.join(command)}", flush=True)
-    completed = subprocess.run(command, check=False)
+    try:
+        # check=False: 예외 대신 반환값을 직접 판단해야 다음 검사도 이어서 실행된다.
+        completed = subprocess.run(command, check=False)
+    except OSError as error:
+        # 모듈 미설치 등으로 명령 실행 자체가 안 되는 경우도 다음 검사로 넘어가야 한다.
+        print(f"[예외 처리] {label} 실행 실패 - {error}")
+        return False
     if completed.returncode == 0:
         print(f"✓ {label} 통과")
         return True
@@ -583,9 +639,9 @@ def test_위도_범위_초과_검증_실패() -> None:
 async def main() -> None:
     """수집 → 검증 → 저장 → 성능 비교 순서로 실습을 실행한다.
 
-    각 단계를 print_stage로 구분해 출력하며, 중간에 발생하는
-    RuntimeError/ValueError/ValidationError는 이 함수에서 최종적으로 처리해
-    학습용 실행이 긴 traceback 없이 원인 메시지로 종료되게 한다.
+    각 단계를 print_stage로 구분해 출력한다. 각 단계는 실패 시 원인을
+    이미 print로 출력하므로, 이 함수의 except 절은 학습용 실행이 긴
+    traceback 없이 안전하게 종료되도록 하는 마지막 안전망 역할만 한다.
     """
     try:
         print_stage(1, "환경 준비")
@@ -610,9 +666,18 @@ async def main() -> None:
 
         print_stage(5, "테스트 및 코드 스타일 검사")
         run_quality_checks()
-    except (RuntimeError, ValueError, ValidationError) as error:
+    except (
+        RuntimeError,
+        ValueError,
+        ValidationError,
+        httpx.HTTPError,
+        OSError,
+    ) as error:
         # 학습용 실행에서는 긴 traceback 대신 원인을 이해하기 쉬운 문장으로 표시한다.
-        print(f"\n[실행 실패] {error}")
+        print(f"\n[실행 실패] {type(error).__name__}: {error}")
+    except Exception as error:
+        # 예상하지 못한 오류도 원인을 남기고 학습용 실행을 안전하게 종료한다.
+        print(f"\n[예상치 못한 오류] {type(error).__name__}: {error}")
 
 
 if __name__ == "__main__":
