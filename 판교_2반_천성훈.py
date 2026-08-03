@@ -1,5 +1,24 @@
+# =============================================================================
+# 파일명 : 판교_2반_천성훈.py
+# 작성자 : 천성훈
+# 작성일 : 2026-08-03
+# 설명   : Day 1 종합 실습 - 공개 API 비동기 수집, Pydantic 검증, CSV/Parquet 저장,
+#          그리고 두 저장 형식의 성능(쓰기·읽기 시간, 파일 크기) 비교
+# 실행   : .venv/bin/python '판교_2반_천성훈.py'
+#
+# [주석 규칙]
+# 1) 섹션 구분  : "# ----" 구분선 + "숫자. 제목" 형태로 큰 단계를 나눈다.
+# 2) 함수 docstring : 첫 줄 한 줄 요약 + (필요 시) 상세 설명 + Args/Returns/Raises.
+#                    - Args   : 매개변수가 있을 때만 작성한다.
+#                    - Returns: None이 아닌 값을 반환할 때만 작성한다.
+#                    - Raises : 의도적으로 예외를 발생시킬 때만 작성한다.
+# 3) 클래스 docstring : 역할을 설명하는 한 줄 요약만 작성한다(필드는 Field로 자기 설명).
+# 4) 인라인 주석 : 코드가 "무엇을" 하는지가 아니라 "왜" 그렇게 작성했는지를 설명하며,
+#                해당 코드 바로 위 줄에 '~다.'체 문장과 마침표로 작성한다.
+# =============================================================================
+
 """Day 1 종합 실습: 공개 API 비동기 수집, 검증, 저장 및 성능 비교.
-.venv/bin/python '판교_2반_천성훈.py'
+
 실습 흐름
 1. ``asyncio``와 ``httpx``로 3개 API를 동시에 호출한다.
 2. 응답 JSON에서 필요한 필드만 추출한다.
@@ -44,7 +63,12 @@ OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
 def print_stage(number: int, title: str) -> None:
-    """현재 진행 단계를 터미널에서 바로 구분할 수 있게 출력한다."""
+    """현재 진행 단계를 구분선과 번호로 터미널에 출력한다.
+
+    Args:
+        number: 전체 단계 중 현재 단계 번호.
+        title: 현재 단계를 설명하는 제목.
+    """
     print(f"\n{'=' * 64}")
     print(f"[{number}/5] {title}")
     print("=" * 64, flush=True)
@@ -73,7 +97,17 @@ class WeatherRecord(StrictModel):
     @field_validator("time")
     @classmethod
     def validate_iso_time(cls, value: str) -> str:
-        """시간 문자열이 Open-Meteo의 YYYY-MM-DDTHH:MM 형태인지 확인한다."""
+        """시간 문자열이 Open-Meteo의 YYYY-MM-DDTHH:MM 형태인지 확인한다.
+
+        Args:
+            value: 검증할 시간 문자열.
+
+        Returns:
+            검증을 통과한 시간 문자열 원본.
+
+        Raises:
+            ValueError: 날짜/시간 형식으로 해석할 수 없을 때.
+        """
         try:
             pd.Timestamp(value)
         except ValueError as error:
@@ -126,6 +160,14 @@ async def fetch_json(client: httpx.AsyncClient, name: str, url: str) -> FetchRes
 
     네트워크 오류, 타임아웃, 4xx/5xx 응답, 잘못된 JSON을 API별로 처리한다.
     따라서 API 하나가 실패해도 다른 API의 수집 결과는 확인할 수 있다.
+
+    Args:
+        client: 요청에 사용할 공용 httpx 비동기 클라이언트.
+        name: 결과를 구분하기 위한 API 이름(weather/country/location).
+        url: 호출할 API의 전체 URL.
+
+    Returns:
+        성공/실패 여부와 데이터(또는 오류 메시지)를 담은 FetchResult.
     """
     try:
         response = await client.get(url)
@@ -139,7 +181,11 @@ async def fetch_json(client: httpx.AsyncClient, name: str, url: str) -> FetchRes
 
 
 async def collect_all() -> dict[str, FetchResult]:
-    """``asyncio.gather``로 세 API를 동시에 수집한다."""
+    """``asyncio.gather``로 세 API를 동시에 수집한다.
+
+    Returns:
+        API 이름을 key로, 각 API의 FetchResult를 value로 갖는 딕셔너리.
+    """
     # 전체 연결/응답을 무한정 기다리지 않도록 15초 제한을 둔다.
     timeout = httpx.Timeout(15.0)
     headers = {"User-Agent": "day1-api-practice/1.0"}
@@ -160,14 +206,34 @@ async def collect_all() -> dict[str, FetchResult]:
 
 
 def require_data(result: FetchResult) -> dict[str, Any]:
-    """수집 성공 데이터만 반환하고, 실패 결과에는 명확한 오류를 발생시킨다."""
+    """수집 성공 데이터만 반환하고, 실패 결과에는 명확한 오류를 발생시킨다.
+
+    Args:
+        result: 검사할 단일 API의 수집 결과.
+
+    Returns:
+        수집에 성공한 JSON 데이터(dict).
+
+    Raises:
+        RuntimeError: 수집이 실패했거나 데이터가 없을 때.
+    """
     if not result.ok or result.data is None:
         raise RuntimeError(f"{result.name} API 수집 실패: {result.error}")
     return result.data
 
 
 def validate_weather(data: dict[str, Any]) -> list[WeatherRecord]:
-    """배열 형태의 시간·기온·강수확률을 시간별 레코드로 변환·검증한다."""
+    """배열 형태의 시간·기온·강수확률을 시간별 레코드로 변환·검증한다.
+
+    Args:
+        data: weather API 응답 JSON.
+
+    Returns:
+        검증을 통과한 WeatherRecord 리스트.
+
+    Raises:
+        ValueError: hourly 객체가 없거나 배열 길이가 서로 다를 때.
+    """
     hourly = data.get("hourly")
     if not isinstance(hourly, dict):
         raise ValueError("날씨 응답에 hourly 객체가 없습니다.")
@@ -195,7 +261,17 @@ def validate_weather(data: dict[str, Any]) -> list[WeatherRecord]:
 
 
 def validate_country(data: dict[str, Any]) -> CountryRecord:
-    """국가 JSON에서 필요한 필드만 추출하여 검증한다."""
+    """국가 JSON에서 필요한 필드만 추출하여 검증한다.
+
+    Args:
+        data: country API 응답 JSON.
+
+    Returns:
+        검증을 통과한 CountryRecord.
+
+    Raises:
+        ValueError: 통화 정보가 없을 때.
+    """
     currencies = data.get("currencies") or []
     if not currencies or not isinstance(currencies[0], dict):
         raise ValueError("국가 응답에 통화 정보가 없습니다.")
@@ -214,7 +290,17 @@ def validate_country(data: dict[str, Any]) -> CountryRecord:
 
 
 def validate_location(data: dict[str, Any]) -> LocationRecord:
-    """IP 위치 JSON에서 필요한 필드를 추출하고 좌표 범위를 검증한다."""
+    """IP 위치 JSON에서 필요한 필드를 추출하고 좌표 범위를 검증한다.
+
+    Args:
+        data: location API 응답 JSON.
+
+    Returns:
+        검증을 통과한 LocationRecord.
+
+    Raises:
+        ValueError: ip-api가 처리 실패(status != "success")를 반환했을 때.
+    """
     # ip-api는 HTTP 200에서도 status="fail"을 반환할 수 있으므로 확인한다.
     if data.get("status") != "success":
         raise ValueError(f"ip-api 처리 실패: {data.get('message', '알 수 없는 오류')}")
@@ -231,7 +317,14 @@ def validate_location(data: dict[str, Any]) -> LocationRecord:
 
 
 def validate_all(results: dict[str, FetchResult]) -> dict[str, pd.DataFrame]:
-    """세 응답을 검증한 뒤 저장에 적합한 DataFrame으로 변환한다."""
+    """세 응답을 검증한 뒤 저장에 적합한 DataFrame으로 변환한다.
+
+    Args:
+        results: collect_all이 반환한 API별 수집 결과.
+
+    Returns:
+        API 이름을 key로, 검증된 데이터의 DataFrame을 value로 갖는 딕셔너리.
+    """
     weather = validate_weather(require_data(results["weather"]))
     country = validate_country(require_data(results["country"]))
     location = validate_location(require_data(results["location"]))
@@ -269,7 +362,20 @@ def validate_all(results: dict[str, FetchResult]) -> dict[str, pd.DataFrame]:
 def measure_file_format(
     frame: pd.DataFrame, name: str, file_format: str
 ) -> dict[str, Any]:
-    """동일한 DataFrame을 지정 형식으로 저장·재로드하고 성능을 측정한다."""
+    """동일한 DataFrame을 지정 형식으로 저장·재로드하고 성능을 측정한다.
+
+    Args:
+        frame: 저장할 DataFrame.
+        name: 데이터셋 이름(파일명 접두사로 사용).
+        file_format: 저장 형식("csv" 또는 "parquet").
+
+    Returns:
+        데이터셋 이름, 형식, 행 수, 쓰기/읽기 시간(ms), 파일 크기(byte)를
+        담은 딕셔너리.
+
+    Raises:
+        ValueError: file_format이 "csv"/"parquet"가 아닐 때.
+    """
     # 예: name="weather", file_format="csv"면 output/weather.csv가 된다.
     path = OUTPUT_DIR / f"{name}.{file_format}"
 
@@ -313,7 +419,14 @@ def measure_file_format(
 
 
 def save_and_compare(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """모든 검증 데이터를 두 형식으로 저장하고 측정 결과를 반환한다."""
+    """모든 검증 데이터를 두 형식으로 저장하고 측정 결과를 반환한다.
+
+    Args:
+        frames: validate_all이 반환한 데이터셋별 DataFrame.
+
+    Returns:
+        데이터셋 x 형식 조합별 성능 측정 결과를 담은 DataFrame.
+    """
     # output 폴더가 없으면 생성하고, 있으면 그대로 사용한다.
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     measurements: list[dict[str, Any]] = []
@@ -333,7 +446,12 @@ def save_and_compare(frames: dict[str, pd.DataFrame]) -> pd.DataFrame:
 
 
 def print_summary(frames: dict[str, pd.DataFrame], comparison: pd.DataFrame) -> None:
-    """실행 결과와 성능 비교표를 터미널에 출력한다."""
+    """실행 결과와 성능 비교표를 터미널에 출력한다.
+
+    Args:
+        frames: 검증된 데이터셋별 DataFrame.
+        comparison: save_and_compare가 반환한 성능 비교 결과.
+    """
     print("\n=== 스키마 검증 결과 ===")
     print(f"날씨 데이터: {len(frames['weather'])}건 검증 통과")
     print(f"국가 데이터: {len(frames['country'])}건 검증 통과")
@@ -344,7 +462,15 @@ def print_summary(frames: dict[str, pd.DataFrame], comparison: pd.DataFrame) -> 
 
 
 def run_check(command: list[str], label: str) -> bool:
-    """품질 검사 명령을 실행하고 결과를 현재 터미널에 이어서 표시한다."""
+    """품질 검사 명령을 실행하고 결과를 현재 터미널에 이어서 표시한다.
+
+    Args:
+        command: 실행할 명령과 인자 목록.
+        label: 결과 메시지에 표시할 검사 이름.
+
+    Returns:
+        명령이 종료 코드 0으로 끝났으면 True, 아니면 False.
+    """
     print(f"\n$ {' '.join(command)}", flush=True)
     completed = subprocess.run(command, check=False)
     if completed.returncode == 0:
@@ -393,7 +519,11 @@ def test_정상_날씨_데이터_검증_통과() -> None:
     [-1, 101],
 )
 def test_잘못된_강수확률_검증_실패(probability: int) -> None:
-    """강수확률은 반드시 0~100 범위여야 한다."""
+    """강수확률은 반드시 0~100 범위여야 한다.
+
+    Args:
+        probability: 범위를 벗어난 강수확률 테스트 값(-1 또는 101).
+    """
     with pytest.raises(ValidationError):
         WeatherRecord(
             time="2026-08-03T12:00",
@@ -451,7 +581,12 @@ def test_위도_범위_초과_검증_실패() -> None:
 
 
 async def main() -> None:
-    """수집 → 검증 → 저장 → 성능 비교 순서로 실습을 실행한다."""
+    """수집 → 검증 → 저장 → 성능 비교 순서로 실습을 실행한다.
+
+    각 단계를 print_stage로 구분해 출력하며, 중간에 발생하는
+    RuntimeError/ValueError/ValidationError는 이 함수에서 최종적으로 처리해
+    학습용 실행이 긴 traceback 없이 원인 메시지로 종료되게 한다.
+    """
     try:
         print_stage(1, "환경 준비")
         print(f"✓ Python 실행 파일: {sys.executable}")
