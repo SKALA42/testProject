@@ -1,0 +1,11 @@
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["판교_2반_천성훈.py"]
+addopts = "-v"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]

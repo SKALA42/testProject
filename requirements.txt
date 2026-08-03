@@ -1,0 +1,15 @@
+# HTTP 비동기 통신
+httpx>=0.28.1,<0.29
+
+# JSON 스키마 및 타입/범위 검증(Pydantic v2)
+pydantic>=2.10,<3
+
+# 표 데이터 처리와 CSV 저장
+pandas>=2.2,<4
+
+# Parquet 읽기/쓰기 엔진
+pyarrow>=18,<24
+
+# 테스트와 코드 스타일 검사
+pytest>=8,<10
+ruff>=0.9,<1
